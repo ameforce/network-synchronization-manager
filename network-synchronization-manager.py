@@ -1,9 +1,7 @@
 from multiprocessing import Pool
 from datetime import datetime
 from tqdm import tqdm
-import multiprocessing
-import subprocess
-import paramiko
+import winreg
 import shutil
 import time
 import os
@@ -11,12 +9,15 @@ import os
 
 class NetworkSynchronizationManager:
     def __init__(self):
-        self.interval_time = 5 * 60
+        self.interval_time = 0.05 * 60
         self.__connect_method_list, self.__connect_method = ['ssh', 'copy'], ''
         self.__path_dict = {'src_path': '', 'dst_path': ''}
         self.__file_list, self.__src_file_list, self.__dst_file_list = [], [], []
         self.__file_dict, self.__src_file_dict, self.__dst_file_dict = {}, {}, {}
         self.__replace_file_dict = {}
+        self.__reg_key = winreg.HKEY_CURRENT_USER
+        self.__reg_path = 'Software\\ENM Soft\\Network Synchronization Manager'
+        self.__is_reg_exist = {'src_path': False, 'dst_path': False}
 
     def __initializing_connect_method(self) -> None:
         self.__connect_method = ''
@@ -50,20 +51,31 @@ class NetworkSynchronizationManager:
                 raise ValueError('The paths in src_path and dst_path cannot be the same. This could be a logical error '
                                  'or use excessive resources.\nPlease enter a different path again.')
 
+    def __read_reg(self, path_kind: str) -> str or None:
+        try:
+            if path_kind != 'src_path' and path_kind != 'dst_path':
+                raise FileNotFoundError
+            reg = winreg.OpenKey(self.__reg_key, self.__reg_path, 0, winreg.KEY_ALL_ACCESS)
+            reg_value, reg_type = winreg.QueryValueEx(reg, f'{path_kind}_list')
+            self.__is_reg_exist[path_kind] = True
+            self.__path_dict[path_kind] = reg_value
+        except FileNotFoundError:
+            return None
+
     def __set_path(self) -> None:
         self.__initializing_connect_method()
         self.__initializing_path()
         print(f'Enter the way you want to connect.')
         while True:
             for i in range(len(self.__connect_method_list)):
-                print(f'{i+1}. {self.__connect_method_list[i]}')
+                print(f'{i + 1}. {self.__connect_method_list[i]}')
             selection = input('--> ')
             try:
                 self.__validate_selection(selection)
             except ValueError as e:
                 print(f'\n\n{e}')
                 continue
-            self.__connect_method = self.__connect_method_list[int(selection)-1]
+            self.__connect_method = self.__connect_method_list[int(selection) - 1]
             print(self.__connect_method)
             break
         for path_kind in self.__path_dict:
@@ -79,6 +91,43 @@ class NetworkSynchronizationManager:
                     continue
                 self.__path_dict[path_kind] = path
                 break
+    # def __save_reg(self) -> None:
+        # open = winreg.OpenKey(self.__save_reg_key, self.__save_reg_path, 0, winreg.KEY_ALL_ACCESS)
+        # value
+
+    # def __set_path(self) -> None:
+    #     self.__initializing_connect_method()
+    #     self.__initializing_path()
+    #     print(f'Enter the way you want to connect.')
+    #     while True:
+    #         for i in range(len(self.__connect_method_list)):
+    #             print(f'{i+1}. {self.__connect_method_list[i]}')
+    #         selection = input('--> ')
+    #         try:
+    #             self.__validate_selection(selection)
+    #         except ValueError as e:
+    #             print(f'\n\n{e}')
+    #             continue
+    #         self.__connect_method = self.__connect_method_list[int(selection)-1]
+    #         break
+    #     print()
+    #     for path_kind in self.__path_dict:
+    #         self.__read_reg(path_kind)
+    #         if self.__path_dict[path_kind] == '':
+    #             print(f'Enter the {path_kind} you want to monitor.')
+    #             if self.__connect_method == 'ssh' and path_kind == 'dst_path':
+    #                 print(f'WARNING: It must be accessible via SSH')
+    #             while True:
+    #                 path = input('--> ')
+    #                 try:
+    #                     self.__validate_path(path, self.__connect_method)
+    #                     break
+    #                 except ValueError as e:
+    #                     print(f'\n\n{e}')
+    #                     continue
+    #         # self.__path_dict[path_kind] = path
+    #         print()
+    #         # self.__save_reg(path)
 
     def __get_file_list(self, path: str) -> list[str]:
         # Todo: Change to handle multithreading at a later date.
@@ -113,36 +162,31 @@ class NetworkSynchronizationManager:
         return self.__replace_file_dict
 
     @staticmethod
-    def __copy_file(src_file: str, dst_file: str, progress: tqdm) -> None:
+    def copy_file(src_file: str, dst_file: str) -> None:
         shutil.copy2(src_file, dst_file)
 
     def __file_transfer(self):
         # Todo: requires development
-        pool = Pool(processes=8)
-        progress_list = []
-        process_list = []
+        pool = Pool()
+        ret_list = []
         for src_file in self.__replace_file_dict:
-            dst_file = self.__replace_file_dict[src_file]
-            command = f'copy "{src_file}" "{dst_file}"'
-            print(f'command: {command}')
-            progress = tqdm(total=os.path.getsize(src_file), unit='bytes', unit_scale=True)
-            progress_list.append(progress)
-            process_list.append(pool.apply_async(self.__copy_file, args=(src_file, dst_file, progress)))
+            ret_list.append(pool.apply_async(NetworkSynchronizationManager.copy_file, (src_file, self.__replace_file_dict[src_file],)))
+
+        with tqdm(total=len(ret_list), desc='Synchronizing') as progress:
+            while len(ret_list) != 0:
+                for ret in ret_list:
+                    if ret.ready():
+                        ret_list.remove(ret)
+                        progress.update()
         pool.close()
-        while not all([process.ready() for process in process_list]):
-            for progress in progress_list:
-                progress.update()
-            continue
-        print(f'FINISH: ~~')
-        for progress in progress_list:
-            progress.close()
-        return
+        pool.join()
+        progress.close()
 
     def logic(self) -> None:
-        print('Path set and validation...', end='')
+        # time.sleep(500000)
         self.__set_path()
-        print('Complete')
         while True:
+            os.system('cls')
             self.__initializing_file()
             print('Getting list of files in src_path...', end='')
             self.__src_file_list = self.__get_file_list(self.__path_dict['src_path'])
@@ -157,9 +201,9 @@ class NetworkSynchronizationManager:
             print('Determining the list of files to update...', end='')
             self.__determine_latest(self.__src_file_dict, self.__dst_file_dict)
             print('Complete')
-            print('Transferring files...', end='')
+            print('Transferring files...')
             self.__file_transfer() # Todo: requires development
-            print('Complete')
+            print(f'\nSynchronization Complete!!!')
             self.__initializing_file()
             self.__initializing_need_file()
             time.sleep(self.interval_time)
